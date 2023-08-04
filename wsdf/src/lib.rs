@@ -207,6 +207,9 @@
 //! * [`Offset`](tap::Offset), the current byte offset into the packet
 //! * [`Packet`](tap::Packet), the raw bytes of the packet
 //! * [`PacketNanos`](tap::PacketNanos), the nanosecond timestamp at which the packet was recorded
+//! * [`SrcAddr`](tap::SrcAddr) and [`DstAddr`](tap::DstAddr), the source and destination IP
+//!   addresses
+//!
 //!
 //! Any permutation of the parameters is supported.
 //!
@@ -711,6 +714,8 @@ pub trait Protocol: ProtocolField {
 /// See <https://github.com/alexpusch/rust-magic-function-params> for how the magic parameter
 /// passing stuff works.
 pub mod tap {
+    use std::net::IpAddr;
+
     use crate::FieldsStore;
 
     /// A context holding packet information we might care about. *Meant for internal use*.
@@ -755,6 +760,10 @@ pub mod tap {
     /// You probably want to use this in combination with [`Packet`] to index and slice the packet
     /// data.
     pub struct Offset(pub usize);
+    /// The source IP address. Only applicable for protocols at IP layer or above.
+    pub struct SrcAddr(pub Option<IpAddr>);
+    /// The destination IP address. Only applicable for protocols at IP layer or above.
+    pub struct DstAddr(pub Option<IpAddr>);
 
     impl<T: Clone> FromContext<'_, T> for Field<T> {
         fn from_ctx(ctx: &Context<T>) -> Self {
@@ -787,6 +796,44 @@ pub mod tap {
         }
     }
 
+    impl<T: Clone> FromContext<'_, T> for SrcAddr {
+        fn from_ctx(ctx: &Context<'_, T>) -> Self {
+            let pinfo = unsafe { *ctx.pinfo };
+            SrcAddr(parse_ip_address(&pinfo.src))
+        }
+    }
+
+    impl<T: Clone> FromContext<'_, T> for DstAddr {
+        fn from_ctx(ctx: &Context<'_, T>) -> Self {
+            let pinfo = unsafe { *ctx.pinfo };
+            DstAddr(parse_ip_address(&pinfo.dst))
+        }
+    }
+
+    fn parse_ip_address(addr: &epan_sys::_address) -> Option<IpAddr> {
+        let data = addr.data as *const u8;
+        let addr_bytes = unsafe { std::slice::from_raw_parts(data, addr.len as _) };
+        match addr.type_ as _ {
+            epan_sys::address_type_AT_IPv4 => {
+                debug_assert_eq!(addr.len, 4);
+                let addr_bytes = TryInto::<[u8; 4]>::try_into(addr_bytes);
+                match addr_bytes {
+                    Ok(addr_bytes) => Some(addr_bytes.into()),
+                    Err(_) => None,
+                }
+            }
+            epan_sys::address_type_AT_IPv6 => {
+                debug_assert_eq!(addr.len, 16);
+                let addr_bytes = TryInto::<[u8; 16]>::try_into(addr_bytes);
+                match addr_bytes {
+                    Ok(addr_bytes) => Some(addr_bytes.into()),
+                    Err(_) => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     #[doc(hidden)]
     pub trait Handler<'a, T: Clone, Args, Ret> {
         fn call(self, ctx: &Context<'a, T>) -> Ret;
@@ -813,6 +860,8 @@ pub mod tap {
     impl_handler!(Arg1, Arg2, Arg3);
     impl_handler!(Arg1, Arg2, Arg3, Arg4);
     impl_handler!(Arg1, Arg2, Arg3, Arg4, Arg5);
+    impl_handler!(Arg1, Arg2, Arg3, Arg4, Arg5, Arg7);
+    impl_handler!(Arg1, Arg2, Arg3, Arg4, Arg5, Arg6, Arg7);
 
     #[doc(hidden)]
     pub fn handle_tap<'a, T, Args, H>(ctx: &Context<'a, T>, handler: H)
